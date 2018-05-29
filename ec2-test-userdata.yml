@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Test UserData in Default VPC
+Parameters:
+    pEC2KeyPairBastion:
+        Description: Select Keypair to Assign to EC2 Instances
+        Type: AWS::EC2::KeyPair::KeyName
+    SubnetId:
+        Description: The subnet these instances will be associated with
+        Type: AWS::EC2::Subnet::Id
+        ConstraintDescription: must be list of valid subnet IDs
+    SecurityGroupIds:
+        Description: Note - Select security group(s) that belongs to the VPC that this subnet is part of.
+        Type: 'List<AWS::EC2::SecurityGroup::Id>'
+        ConstraintDescription: must be list of EC2 security group ids
+    pEC2KeyPairBastion:
+        Description: Name of existing EC2 key pair for BASTION hosts
+        Type: String
+        Default: ''
+    pBastionInstanceType:
+        Description: Bastion EC2 instance type
+        Type: String
+        Default: t2.micro
+    pBastionAmi:
+        Description: AMI to use for bastion host
+        Type: String
+        Default: 'ami-cb9ec1b1'
+    S3URL:
+        Description: Quick Start S3 URL prefix.
+        Default: https://s3.amazonaws.com
+        Type: String
+    S3BucketName:
+        AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z\-\.]*[0-9a-zA-Z])*$
+        ConstraintDescription: Quick Start bucket name can include numbers, lowercase
+            letters, uppercase letters, periods (.), and hyphens (-). It cannot start or end with a hyphen
+            (-).
+        Default: jenkins-bkp-lijo
+        Description: S3 bucket name for the Quick Start assets. Quick Start bucket name
+            can include numbers, lowercase letters, uppercase letters, periods (.), and hyphens (-).
+            It cannot start or end with a hyphen (-).
+        Type: String
+Resources:
+    # TA instace profile for the Bastion Host
+    rBastionInstanceRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service:
+                    - ec2.amazonaws.com
+                Action:
+                  - sts:AssumeRole
+          Path: /
+          Policies:
+            - PolicyName: BastionHostPermissions
+              PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Sid: GetObjectsFromS3
+                    Effect: Allow
+                    Action:
+                      - s3:GetObject
+                      - s3:ListAllMyBuckets
+                      - s3:ListBucket
+                      - s3:HeadBucket
+                      - s3:ListObjects
+                    Resource:
+                      - 'arn:aws:s3:::*'
+                  - Sid: EC2FullAccess
+                    Effect: Allow
+                    Action:
+                      - 'ec2:*'
+                    Resource:
+                      - '*'
+    rBastionInstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+          Path: /
+          Roles:
+            - !Ref rBastionInstanceRole
+    rMgmtBastionInstance:
+        Type: AWS::EC2::Instance
+        Properties:
+            InstanceType: !Ref pBastionInstanceType
+            IamInstanceProfile: !Ref rBastionInstanceProfile
+            KeyName: !Ref pEC2KeyPairBastion
+            Tags:
+              - Key: Name
+                Value: BastionHost
+            ImageId: !Ref pBastionAmi
+            SubnetId: !Ref SubnetId
+            UserData: !Base64
+                'Fn::Sub': |
+                    #!/bin/bash -xe
+
+                    echo Configure the region
+                    aws configure set region ${AWS::Region}
+
+                    echo Installing jq
+                    sudo yum update -y
+                    sudo yum install jq -y
+
+                    echo Installing ansible
+                    sudo yum install epel-release -y
+                    sudo yum-config-manager --enable epel
+                    sudo yum update -y
+                    sudo yum install ansible -y
+
+                    echo Copy the key and bootstrap function from S3
+                    aws s3 cp s3://${S3BucketName}/bootstrap-function-latest.tgz /tmp/bootstrap/
+                    tar xvzf /tmp/bootstrap/bootstrap-function-latest.tgz -C /tmp/bootstrap/
+                    cp -avr /tmp/bootstrap/ansible/* /etc/ansible/
+                    cp /tmp/bootstrap/${pEC2KeyPairBastion}.pem /root/
+                    rm -rf /tmp/bootstrap
+
+                    echo Getting the ansible hosts file ready
+                    aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,PrivateIpAddress,Tags[?Key==`Name`].Value]' --region ${AWS::Region} | jq -r '.[] | .[0] | {server_name: .[2] | .[0], ip: .[1]} []' >> /etc/ansible/hosts
+
+                    echo Cleaning up the public key for use with ansible
+                    cat /root/.ssh/authorized_keys | grep -o -P '(?=ssh-rsa).*(?>${pEC2KeyPairBastion})' >> /tmp/authkey.pub
+                    sed -i d /root/.ssh/authorized_keys
+                    cat /tmp/authkey.pub >> /root/.ssh/authorized_keys
+                    rm -rf /tmp/authkey.pub
+
+                    echo Setup sshd for ansible connection
+                    sed -i '/PermitRootLogin/d' /etc/ssh/sshd_config
+                    echo "PermitRootLogin without-password" >> /etc/ssh/sshd_config
+                    service sshd restart
+Outputs:
+    BastionPrivateIP:
+        Value: !GetAtt rMgmtBastionInstance.PrivateIp

@@ -1,0 +1,14 @@
+# Smallest EC2 instance
+myInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: 'true'
+        DeviceIndex: '0'
+        GroupSet:
+        - Ref: myVPCEC2SecurityGroup
+        SubnetId:
+          Ref: PublicSubnet
+      KeyName:
+        Ref: EC2KeyPairName
+      ImageId: 'amixxxxx'
